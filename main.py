@@ -73,7 +73,8 @@ def build_passport_string(row):
         if any(x in key for x in ["дата", "когда", "число"]):
             val = clean_val(row_lower[key])
             if val:
-                try: date_issued = pd.to_datetime(val).strftime("%d.%m.%Y")
+                try: 
+                    date_issued = pd.to_datetime(val, dayfirst=True).strftime("%d.%m.%Y")
                 except: date_issued = val 
                 break
 
@@ -87,9 +88,11 @@ def build_passport_string(row):
 def clean_case(text):
     if not text: return ""
     text = str(text)
+    # Если текст весь ВЕРХНИМ РЕГИСТРОМ (как в ЕГРЮЛ часто бывает), делаем первую заглавной
+    # Но если там смешанный регистр (ООО "Ромашка"), не трогаем
     upper_chars = sum(1 for c in text if c.isupper())
-    if len(text) > 4 and (upper_chars / len(text)) > 0.5:
-        return text.capitalize()
+    if len(text) > 4 and (upper_chars / len(text)) > 0.8:
+        return text.capitalize() # БЫЛО: text.capitalize(). ТЕПЕРЬ: можно сделать умнее, но пока оставим
     return text
 
 def try_read_csv(file_source, encoding, sep):
@@ -156,27 +159,53 @@ def make_times_new_roman(text):
     rt.add(str(text), font='Times New Roman', size=24)
     return rt
 
+# --- ФУНКЦИИ ОБРАБОТКИ ТЕКСТА ---
+
 def get_inflected(text: str, case_tag: str) -> str:
     if not text or 'morph' not in globals(): return text
     res = []
     for w in text.split():
         try:
+            is_capitalized = w[0].isupper()
             p = morph.parse(w)[0]
             inflected = p.inflect({case_tag})
+            
             if inflected:
                 word = inflected.word
-                if w[0].isupper(): word = word.capitalize()
+                if is_capitalized: word = word.capitalize()
                 res.append(word)
             else:
                 res.append(w)
         except:
             res.append(w)
-    return " ".join(res)
+    
+    final_str = " ".join(res)
+    if final_str:
+        return final_str[0].upper() + final_str[1:]
+    return ""
 
 def get_initials(full_name: str) -> str:
     if not full_name: return ""
     p = full_name.split()
-    return f"{p[0]} {p[1][0]}.{p[2][0]}." if len(p) >= 3 else full_name
+    if len(p) >= 3:
+        return f"{p[0].capitalize()} {p[1][0].upper()}.{p[2][0].upper()}."
+    return full_name
+
+def get_gender_word(fio: str, word_masc: str, word_fem: str) -> str:
+    if not fio: return word_masc
+    parts = fio.split()
+    if len(parts) >= 3:
+        patr = parts[2].lower()
+        if patr.endswith("вна") or patr.endswith("чна") or patr.endswith("шна"):
+            return word_fem
+        if patr.endswith("вич"):
+            return word_masc
+    if len(parts) >= 2 and 'morph' in globals():
+        try:
+            parsed = morph.parse(parts[1])[0] 
+            if 'femn' in parsed.tag: return word_fem
+        except: pass
+    return word_masc
 
 def increment_doc_number(base_num: str, step: int) -> str:
     if step == 0: return base_num
@@ -234,14 +263,17 @@ def create_overlay_image(sign_path, stamp_path):
     except: return sign_path
 
 def get_image_object(doc, filename_or_path, width_mm, do_trim=True):
-    if not filename_or_path: return ""
+    if not filename_or_path: return "[ПУСТОЕ ИМЯ]"
+    
     path = filename_or_path
     if not os.path.exists(path):
         base = os.path.join("data", "signatures", filename_or_path)
         if os.path.exists(base): path = base
         elif os.path.exists(base + ".png"): path = base + ".png"
         elif os.path.exists(base + ".jpg"): path = base + ".jpg"
-        else: return ""
+        elif os.path.exists(base + ".jpeg"): path = base + ".jpeg"
+        else:
+            return f"[НЕТ ФАЙЛА: {filename_or_path}]"
 
     final_path = path
     if do_trim and "temp" not in path: 
@@ -251,10 +283,13 @@ def get_image_object(doc, filename_or_path, width_mm, do_trim=True):
             trimmed_name = f"trimmed_{os.path.basename(path)}"
             final_path = os.path.join("data", "signatures", trimmed_name)
             img.save(final_path, format="PNG")
-        except: pass
+        except Exception as e:
+            return f"[ОШИБКА ОБРАБОТКИ: {e}]"
 
-    try: return InlineImage(doc, final_path, width=Mm(width_mm))
-    except: return ""
+    try: 
+        return InlineImage(doc, final_path, width=Mm(width_mm))
+    except Exception as e:
+        return f"[ОШИБКА ВСТАВКИ: {e}]"
 
 # --- 5. ИНТЕРФЕЙС ---
 
@@ -276,7 +311,7 @@ with st.sidebar.expander("✒️ Загрузить подписи сотруд�
                 dest.write(f.getbuffer())
         st.success(f"Загружено {len(uploaded_sigs)} подписей")
 
-st.title("🏗️ Генератор PRO (Docs Pack)")
+st.title("🏗️ Генератор PRO (v8.0)")
 st.markdown("---")
 
 if df_emp is None:
@@ -294,7 +329,6 @@ with col_left:
     st.write("🧑‍💼 **Ответственное лицо:**")
     selected_resp_key = "--- Не указывать ---"
     
-    # Кнопка для генерации личного приказа на ответственного/директора
     if df_resp is not None:
         resp_options = ["--- Не указывать ---"] + list(df_resp['search_key'].unique())
         selected_resp_key = st.selectbox("Кто упоминается в документах:", resp_options)
@@ -322,8 +356,17 @@ with col_right:
                     if "inn" in extracted: st.session_state.c_inn = extracted["inn"]
                     if "kpp" in extracted: st.session_state.c_kpp = extracted["kpp"]
                     if "ogrn" in extracted: st.session_state.c_ogrn = extracted["ogrn"]
-                    if "name" in extracted: st.session_state.c_name = clean_case(extracted["name"])
-                    if "short_name" in extracted: st.session_state.c_short_name = clean_case(extracted["short_name"])
+                    
+                    # ОБНОВЛЕНО: Используем исходный регистр для названия (без clean_case), 
+                    # или аккуратно чистим, но сохраняем структуру
+                    name_extracted = extracted.get("name", "")
+                    # Если все капсом - делаем красиво, если нет - оставляем как есть
+                    if name_extracted.isupper():
+                        st.session_state.c_name = clean_case(name_extracted)
+                    else:
+                        st.session_state.c_name = name_extracted
+                        
+                    if "short_name" in extracted: st.session_state.c_short_name = extracted["short_name"]
                     if "address" in extracted: st.session_state.c_address = clean_case(extracted["address"])
                     if "boss_name" in extracted: st.session_state.c_boss = clean_case(extracted["boss_name"])
                     if "boss_pos" in extracted: st.session_state.c_boss_pos = clean_case(extracted["boss_pos"])
@@ -375,14 +418,19 @@ if st.button("🚀 Сформировать документы", type="primary",
         row = df_emp[df_emp['search_key'] == key].iloc[0]
         tasks.append({"data": row, "role": "emp"})
         
-    opf = st.session_state.c_opf
-    name = st.session_state.c_name
-    full_company_name = f"{opf} {name}" if "ИП" in opf else f"{opf} «{name}»"
+    opf = st.session_state.c_opf.strip()
+    name = st.session_state.c_name.strip()
+    
+    # === ИСПРАВЛЕНИЕ: ПРЯМАЯ СКЛЕЙКА ===
+    # Больше программа не добавляет никаких кавычек автоматически.
+    # Что написано в полях "ОПФ" и "Название" — то и будет в документе.
+    full_company_name = f"{opf} {name}".strip()
+    # ===================================
+             
     b_name = st.session_state.c_boss
     b_pos = st.session_state.c_boss_pos
     short_name_val = st.session_state.c_short_name if st.session_state.c_short_name else full_company_name
     
-    # Данные ответственного (для вставки в обычные документы)
     resp_name_str = ""
     resp_pos_str = ""
     resp_doc_str = ""
@@ -402,7 +450,6 @@ if st.button("🚀 Сформировать документы", type="primary",
     months_ru = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
     date_full = f"«{doc_date.day:02d}» {months_ru[doc_date.month - 1]} {doc_date.year} г."
 
-    # Картинка для директора
     combo_path = None
     if director_path_temp:
         combo_path = create_overlay_image(director_path_temp, stamp_path_temp)
@@ -411,23 +458,34 @@ if st.button("🚀 Сформировать документы", type="primary",
     files_ok = 0
     progress = st.progress(0)
     
+    # 2. ДОБАВЛЯЕМ СТИЛЬ В ИМЕНА ФАЙЛОВ
+    style_suffix = f"_{selected_style}"
+    
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         
-        # --- 1. ГЕНЕРАЦИЯ ОБЩИХ ДОКУМЕНТОВ (ОПИСЬ И ПРИКАЗЫ) ---
-        
-        # Общий контекст компании
+        info_text = f"""Дата генерации: {date.today()}
+Компания: {full_company_name}
+Использован стиль: {selected_style}
+Сотрудников обработано: {len(tasks)}
+        """
+        zf.writestr("00_INFO.txt", info_text)
+
         company_ctx = {
             "city": city, "contract_date": date_short, "date_ru": date_full,
             "company_name": full_company_name, "company_short": short_name_val,
             "company_address": st.session_state.c_address,
             "company_inn": st.session_state.c_inn, "company_kpp": st.session_state.c_kpp, "company_ogrn": st.session_state.c_ogrn,
             "head_name": b_name, "head_pos": b_pos, "head_short": get_initials(b_name),
-            "head_name_gen": get_inflected(b_name, 'gent'), "head_pos_gen": get_inflected(b_pos, 'gent'),
+            "head_name_gen": get_inflected(b_name, 'gent'), 
+            "head_pos_gen": get_inflected(b_pos, 'gent'),
+            "head_name_accs": get_inflected(b_name, 'accs'), 
+            "head_pos_accs": get_inflected(b_pos, 'accs'),
+            "head_pos_datv": get_inflected(b_pos, 'datv'),
             "employer_reqs": rt_reqs,
-            "director_combo": get_image_object(DocxTemplate(io.BytesIO()), combo_path, 45, False) if combo_path else "", # Временный хак
+            "director_combo": get_image_object(DocxTemplate(io.BytesIO()), combo_path, 45, False) if combo_path else "",
         }
 
-        # А) ОПИСЬ (Один файл на всех)
+        # --- 1. ОПИСЬ ---
         inventory_path = "templates/inventory.docx"
         if os.path.exists(inventory_path):
             try:
@@ -435,21 +493,17 @@ if st.button("🚀 Сформировать документы", type="primary",
                 doc_inv.render(company_ctx)
                 tmp_inv = io.BytesIO()
                 doc_inv.save(tmp_inv)
-                zf.writestr(f"00_Опись.docx", tmp_inv.getvalue())
+                zf.writestr(f"00_Опись{style_suffix}.docx", tmp_inv.getvalue())
                 files_ok += 1
-            except Exception as e:
-                print(f"Err inventory: {e}")
+            except Exception as e: pass
 
-        # Б) СВОДНЫЙ ПРИКАЗ НА ОТВЕТСТВЕННЫХ (Список всех сотрудников)
-        # Выбираем шаблон по стилю (1.docx, 2.docx и т.д.)
-        style_num = selected_style.replace("style", "") # "style1" -> "1"
+        # --- 2. СВОДНЫЙ ПРИКАЗ ---
+        style_num = selected_style.replace("style", "") 
         order_tmpl_path = f"templates/orders/{style_num}.docx"
         
         if os.path.exists(order_tmpl_path):
             try:
                 doc_ord = DocxTemplate(order_tmpl_path)
-                
-                # Собираем список сотрудников для таблицы
                 employees_list = []
                 for t in tasks:
                     emp_data = t["data"]
@@ -462,11 +516,13 @@ if st.button("🚀 Сформировать документы", type="primary",
                         "pos": pos,
                         "name_gen": get_inflected(fio, 'gent'),
                         "pos_gen": get_inflected(pos, 'gent'),
-                        # Важно: создаем картинку подписи именно для ЭТОГО документа (doc_ord)
-                        "sign": get_image_object(doc_ord, fio, 25, True) 
+                        "name_accs": get_inflected(fio, 'accs'), 
+                        "pos_accs": get_inflected(pos, 'accs'),
+                        "accepted": get_gender_word(fio, "принят", "принята"),
+                        "appointed": get_gender_word(fio, "назначен", "назначена"),
+                        "sign": get_image_object(doc_ord, fio, 20, True) 
                     })
                 
-                # Добавляем список в контекст
                 ctx_ord = company_ctx.copy()
                 ctx_ord["col_employees"] = employees_list
                 if combo_path: 
@@ -476,61 +532,49 @@ if st.button("🚀 Сформировать документы", type="primary",
                 doc_ord.render(ctx_ord)
                 tmp_ord = io.BytesIO()
                 doc_ord.save(tmp_ord)
-                zf.writestr(f"00_Сводный_приказ_Ответственные.docx", tmp_ord.getvalue())
+                zf.writestr(f"00_Сводный_приказ_Ответственные{style_suffix}.docx", tmp_ord.getvalue())
                 files_ok += 1
             except Exception as e:
                 st.error(f"Ошибка сводного приказа: {e}")
 
-        # В) ПРИКАЗ НА ГЛАВНОГО ОТВЕТСТВЕННОГО (Или Директора) - Отдельный файл
-        # Определяем, на кого делать
+        # --- 3. ПРИКАЗ НА ОТВЕТСТВЕННОГО ---
         target_resp = {}
         if df_resp is not None and selected_resp_key != "--- Не указывать ---":
-             # Выбран человек из базы
              r_row = df_resp[df_resp['search_key'] == selected_resp_key].iloc[0]
-             target_resp = {
-                 "name": r_row['ФИО'],
-                 "pos": r_row.get('Должность', ''),
-                 "is_director": False
-             }
-             filename_resp = f"Приказ_Ответственный_{get_initials(r_row['ФИО'])}.docx"
+             target_resp = { "name": r_row['ФИО'], "pos": r_row.get('Должность', ''), "is_director": False }
+             filename_resp = f"Приказ_Ответственный_{get_initials(r_row['ФИО'])}"
         else:
-             # Никто не выбран -> делаем на Директора
-             target_resp = {
-                 "name": b_name,
-                 "pos": b_pos,
-                 "is_director": True
-             }
-             filename_resp = f"Приказ_Ответственный_Директор.docx"
+             target_resp = { "name": b_name, "pos": b_pos, "is_director": True }
+             filename_resp = f"Приказ_Ответственный_Директор"
              
-        # Генерируем (используем тот же шаблон сводного приказа, но с 1 человеком в списке)
         if os.path.exists(order_tmpl_path):
              try:
                 doc_r = DocxTemplate(order_tmpl_path)
-                single_list = [{
+                person_data = {
                     "name": target_resp["name"],
                     "short": get_initials(target_resp["name"]),
                     "pos": target_resp["pos"],
                     "name_gen": get_inflected(target_resp["name"], 'gent'),
                     "pos_gen": get_inflected(target_resp["pos"], 'gent'),
-                    # Если это директор - берем его подпись из temp, если сотрудник - из базы
-                    "sign": get_image_object(doc_r, director_path_temp, 30, True) if target_resp["is_director"] else get_image_object(doc_r, target_resp["name"], 30, True)
-                }]
-                
+                    "name_accs": get_inflected(target_resp["name"], 'accs'),
+                    "pos_accs": get_inflected(target_resp["pos"], 'accs'),
+                    "accepted": get_gender_word(target_resp["name"], "принят", "принята"),
+                    "appointed": get_gender_word(target_resp["name"], "назначен", "назначена"),
+                    "sign": get_image_object(doc_r, director_path_temp, 30, True) if target_resp["is_director"] else get_image_object(doc_r, target_resp["name"], 20, True)
+                }
                 ctx_r = company_ctx.copy()
-                ctx_r["col_employees"] = single_list # Передаем как список из 1 элемента
+                ctx_r["col_employees"] = [person_data]
                 if combo_path: 
                     ctx_r["director_combo"] = get_image_object(doc_r, combo_path, 45, False)
                     ctx_r["director_sign"] = get_image_object(doc_r, director_path_temp, 30, True)
-                
                 doc_r.render(ctx_r)
                 tmp_r = io.BytesIO()
                 doc_r.save(tmp_r)
-                zf.writestr(f"00_{filename_resp}", tmp_r.getvalue())
+                zf.writestr(f"00_{filename_resp}{style_suffix}.docx", tmp_r.getvalue())
                 files_ok += 1
              except Exception as e: pass
 
-
-        # --- 2. ГЕНЕРАЦИЯ ЛИЧНЫХ ДОКУМЕНТОВ (ТД, Приказ, Инструкция) ---
+        # --- 4. ЛИЧНЫЕ ДОКУМЕНТЫ ---
         for i, task in enumerate(tasks):
             emp = task["data"]
             role = task["role"]
@@ -544,17 +588,17 @@ if st.button("🚀 Сформировать документы", type="primary",
 
             full_passport_str = build_passport_string(emp)
             pos_nom = emp.get('Должность', '')
-            pos_gen = get_inflected(pos_nom, 'gent')
-            pos_dat = get_inflected(pos_nom, 'datv')
-
+            
             context = company_ctx.copy()
-            # Дополняем контекст личными данными
             context.update({
                 "doc_number": doc_num,
                 "resp_name": resp_name_str, "resp_pos": resp_pos_str, "resp_doc": resp_doc_str,
                 "resp_short": get_initials(resp_name_str),
                 "employee_name": emp['ФИО'], "employee_short": get_initials(emp['ФИО']),
-                "employee_pos": pos_nom, "employee_pos_gen": pos_gen, "employee_pos_dat": pos_dat,
+                "employee_pos": pos_nom,
+                "employee_pos_gen": get_inflected(pos_nom, 'gent'),
+                "employee_pos_dat": get_inflected(pos_nom, 'datv'),
+                "employee_pos_accs": get_inflected(pos_nom, 'accs'),
                 "salary_digits": f"{salary:,}".replace(",", " "),
                 "salary_words": num2words(salary, lang='ru').capitalize() + " рублей 00 копеек",
                 "employee_reqs": make_times_new_roman(full_passport_str),
@@ -575,15 +619,15 @@ if st.button("🚀 Сформировать документы", type="primary",
                         doc = DocxTemplate(path)
                         if combo_path: context["director_combo"] = get_image_object(doc, combo_path, 45, do_trim=False)
                         if director_path_temp: context["director_sign"] = get_image_object(doc, director_path_temp, 30, do_trim=True)
-                        context["employee_sign"] = get_image_object(doc, emp['ФИО'], 30, do_trim=True)
-                        if resp_name_str: context["resp_sign"] = get_image_object(doc, resp_name_str, 30, do_trim=True)
+                        context["employee_sign"] = get_image_object(doc, emp['ФИО'], 20, do_trim=True)
+                        if resp_name_str: context["resp_sign"] = get_image_object(doc, resp_name_str, 20, do_trim=True)
                         
                         doc.render(context)
                         tmp = io.BytesIO()
                         doc.save(tmp)
                         safe_fio = get_initials(emp['ФИО']).replace(".", "")
                         suffix = "_RESP" if role == "resp" else ""
-                        zf.writestr(f"{i+1:02d}_{safe_fio}{suffix}_{name}.docx", tmp.getvalue())
+                        zf.writestr(f"{i+1:02d}_{safe_fio}{suffix}_{name}{style_suffix}.docx", tmp.getvalue())
                         files_ok += 1
                     except Exception: pass
     progress.progress(100)

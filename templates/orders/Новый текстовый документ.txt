@@ -1,0 +1,7 @@
+{%p for i in col_employees %} Назначить {{ i.name_gen }} ответственным за выполнение работ по сохранению объектов культурного наследия в должности {{ i.pos_gen }}. 
+{%p endfor %}
+С приказом ознакомлены:
+{%p for i in col_employees %}
+{{ i.sign }}/{{ i.short }}/ 
+{{ date_ru }}
+{%p endfor %}

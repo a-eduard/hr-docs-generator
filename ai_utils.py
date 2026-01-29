@@ -8,17 +8,21 @@ except ImportError:
     pass 
 from dotenv import load_dotenv
 
+# 1. Принудительно загружаем .env
 load_dotenv()
 
 def get_llm(temp=0.1):
+    # 2. Сначала ищем в .env (os.getenv)
     api_key = os.getenv("YANDEX_API_KEY")
     folder_id = os.getenv("YANDEX_FOLDER_ID")
 
-    if hasattr(st, "secrets"):
-        api_key = st.secrets.get("YANDEX_API_KEY", api_key)
-        folder_id = st.secrets.get("YANDEX_FOLDER_ID", folder_id)
+    # 3. Если в .env пусто, пробуем поискать в secrets (на случай если когда-то выложим в сеть)
+    if not api_key and hasattr(st, "secrets"):
+        api_key = st.secrets.get("YANDEX_API_KEY")
+        folder_id = st.secrets.get("YANDEX_FOLDER_ID")
 
     if not api_key or not folder_id:
+        # Если ключей нигде нет - вернем None, main.py покажет ошибку
         return None
 
     return ChatYandexGPT(
@@ -42,7 +46,7 @@ def clean_json_response(content):
 def generate_ai_duties(position: str) -> str:
     try:
         llm = get_llm(temp=0.6)
-        if not llm: return ""
+        if not llm: return "Ошибка: Нет ключей YandexGPT"
         template = """
         Ты — HR-директор. Напиши 5-7 обязанностей для должности: {position}.
         Стиль: Строгий, официальный.
@@ -56,7 +60,7 @@ def generate_ai_duties(position: str) -> str:
 def extract_data_from_egrul(text: str) -> dict:
     try:
         llm = get_llm(temp=0.1)
-        if not llm: return None
+        if not llm: return None # Ключи не найдены
 
         template = """
         Ты — алгоритм обработки ЕГРЮЛ. Извлеки данные и ОТФОРМАТИРУЙ их.
